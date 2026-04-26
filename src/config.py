@@ -49,7 +49,7 @@ PUBMED_QUERY = (
     'OR "Nat Rev Gastroenterol Hepatol"[Journal]'
     ') '
     # === 期間 ===
-    'AND ("1 year"[PDat]) '
+    'AND ("last 1 year"[PDat]) '
     # === 言語 ===
     'AND (English[Language] OR Japanese[Language]) '
     # === 除外 ===
