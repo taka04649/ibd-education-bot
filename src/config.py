@@ -10,7 +10,7 @@ load_dotenv()
 # 対象: UC, CD, IBDU, pouchitis, IBD 関連合併症を広くカバー
 # 品質フィルタ: RCT / Meta-analysis / Systematic Review /
 #              Practice Guideline / Phase II-III + 主要誌
-# 期間: 直近 1 年以内
+# 期間: 直近 1 年以内（reldate パラメータで指定）
 # ============================================================
 PUBMED_QUERY = (
     # === 対象疾患 ===
@@ -48,13 +48,15 @@ PUBMED_QUERY = (
     'OR "Inflamm Bowel Dis"[Journal] '
     'OR "Nat Rev Gastroenterol Hepatol"[Journal]'
     ') '
-    # === 期間 ===
-    'AND ("last 1 year"[PDat]) '
     # === 言語 ===
     'AND (English[Language] OR Japanese[Language]) '
     # === 除外 ===
     'NOT (comment[PT] OR editorial[PT] OR letter[PT] OR "retracted publication"[PT])'
 )
+
+# 期間フィルタ（reldate=N: 過去 N 日以内）
+# 365 = 1年、730 = 2年、180 = 6ヶ月
+PUBMED_RELDATE_DAYS = 365
 
 # 1回の実行で処理する論文数（2本/回 × 4回/日 = 8本/日）
 MAX_PAPERS_PER_RUN = 2
