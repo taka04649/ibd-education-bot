@@ -1,11 +1,17 @@
-"""PubMed E-utilities API クライアント（信頼度スコアリング付き）。"""
+"""PubMed E-utilities API クライアント（信頼度スコアリング + IBD関連性フィルタ）。"""
+import re
 import time
 import xml.etree.ElementTree as ET
 from typing import Dict, List
 
 import requests
 
-from config import PUBMED_API_KEY, PUBMED_EMAIL, PUBMED_RELDATE_DAYS
+from config import (
+    IBD_RELEVANCE_KEYWORDS,
+    PUBMED_API_KEY,
+    PUBMED_EMAIL,
+    PUBMED_RELDATE_DAYS,
+)
 
 BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
@@ -24,9 +30,6 @@ PRIORITY_PTYPES = [
     "Review",
 ]
 
-# ============================================================
-# 信頼度スコア（大きいほど教育的価値が高い）
-# ============================================================
 PTYPE_SCORE = {
     "Practice Guideline": 100,
     "Guideline": 90,
@@ -41,7 +44,6 @@ PTYPE_SCORE = {
     "Observational Study": 15,
 }
 
-# 主要誌の加点
 JOURNAL_BONUS = {
     "N Engl J Med": 30,
     "Lancet": 30,
@@ -54,6 +56,26 @@ JOURNAL_BONUS = {
     "Clin Gastroenterol Hepatol": 20,
     "Aliment Pharmacol Ther": 15,
     "Inflamm Bowel Dis": 15,
+}
+
+# IBD MeSH Term セット（事後フィルタで使用）
+IBD_MESH_TERMS = {
+    "inflammatory bowel diseases",
+    "colitis, ulcerative",
+    "crohn disease",
+    "pouchitis",
+    "ileitis",
+    "colitis",
+}
+
+# IBD 関連の細粒度トピック MeSH（subhederとして許容）
+IBD_RELATED_MESH = {
+    "biological therapy",
+    "tumor necrosis factor-alpha",
+    "interleukins",
+    "intestinal mucosa",
+    "ileal pouch",
+    "anastomosis, surgical",
 }
 
 
@@ -75,7 +97,6 @@ def search_pubmed(query: str, max_results: int = 50) -> List[str]:
         "retmax": str(max_results),
         "sort": "date",
         "retmode": "json",
-        # 期間フィルタ: 直近 N 日（publication date 基準）
         "datetype": "pdat",
         "reldate": str(PUBMED_RELDATE_DAYS),
         **_common_params(),
@@ -87,7 +108,7 @@ def search_pubmed(query: str, max_results: int = 50) -> List[str]:
 
 
 def fetch_paper_details(pmids: List[str]) -> List[Dict]:
-    """PMID リストから論文詳細を取得し、信頼度スコア付きで返す。"""
+    """PMID リストから論文詳細を取得し、信頼度スコア + IBD関連性チェック付きで返す。"""
     if not pmids:
         return []
 
@@ -102,19 +123,65 @@ def fetch_paper_details(pmids: List[str]) -> List[Dict]:
 
     root = ET.fromstring(r.content)
     papers: List[Dict] = []
+    excluded_count = 0
 
     for article in root.findall(".//PubmedArticle"):
         try:
             paper = _parse_article(article)
-            if paper and paper.get("abstract"):
-                paper["trust_score"] = _calculate_trust_score(paper)
-                papers.append(paper)
+            if not paper or not paper.get("abstract"):
+                continue
+
+            # IBD 関連性の事後チェック
+            if not _is_ibd_relevant(paper):
+                excluded_count += 1
+                print(f"[除外: 非IBD] PMID={paper['pmid']}: {paper['title'][:80]}")
+                continue
+
+            paper["trust_score"] = _calculate_trust_score(paper)
+            papers.append(paper)
         except Exception as e:
             print(f"[warn] Parse error for one article: {e}")
             continue
         time.sleep(0.1)
 
+    if excluded_count > 0:
+        print(f"[info] IBD関連性チェックで {excluded_count} 件を除外しました")
+
     return papers
+
+
+def _is_ibd_relevant(paper: Dict) -> bool:
+    """論文が IBD 領域に関連しているか判定する。
+    
+    判定基準（いずれかを満たす）:
+    1. MeSH Term に IBD 関連の主要 Term が含まれる
+    2. タイトルに IBD 関連キーワードが含まれる
+    3. Abstract の冒頭に IBD 関連キーワードが複数回出現
+    """
+    title_lower = (paper.get("title") or "").lower()
+    abstract_lower = (paper.get("abstract") or "").lower()
+    mesh_terms_lower = {
+        m.lower() for m in paper.get("mesh_terms", [])
+    }
+
+    # 判定1: MeSH Term に IBD 主要 Term が含まれる
+    if mesh_terms_lower & IBD_MESH_TERMS:
+        return True
+
+    # 判定2: タイトルに IBD 関連キーワード
+    for kw in IBD_RELEVANCE_KEYWORDS:
+        if kw in title_lower:
+            return True
+
+    # 判定3: Abstract の冒頭1000文字に IBD 関連キーワードが2回以上出現
+    abstract_head = abstract_lower[:1000]
+    keyword_hits = sum(
+        abstract_head.count(kw) for kw in IBD_RELEVANCE_KEYWORDS
+    )
+    if keyword_hits >= 2:
+        return True
+
+    return False
 
 
 def _parse_article(article: ET.Element) -> Dict:
@@ -169,6 +236,12 @@ def _parse_article(article: ET.Element) -> Dict:
     ]
     primary_ptype = _select_primary_ptype(ptypes)
 
+    # MeSH Terms（IBD関連性チェックで使用）
+    mesh_terms = []
+    for mh in article.findall(".//MeshHeading/DescriptorName"):
+        if mh.text:
+            mesh_terms.append(mh.text.strip())
+
     return {
         "pmid": pmid,
         "title": title,
@@ -181,11 +254,11 @@ def _parse_article(article: ET.Element) -> Dict:
         "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
         "publication_types": ptypes,
         "primary_ptype": primary_ptype,
+        "mesh_terms": mesh_terms,
     }
 
 
 def _select_primary_ptype(ptypes: List[str]) -> str:
-    """複数の Publication Type から、最も重要なものを 1 つ選ぶ。"""
     for priority in PRIORITY_PTYPES:
         if priority in ptypes:
             return priority
@@ -196,7 +269,6 @@ def _select_primary_ptype(ptypes: List[str]) -> str:
 
 
 def _calculate_trust_score(paper: Dict) -> int:
-    """論文の信頼度スコアを計算する。"""
     score = 0
 
     ptype_scores = [PTYPE_SCORE.get(pt, 0) for pt in paper.get("publication_types", [])]
@@ -219,7 +291,6 @@ def _calculate_trust_score(paper: Dict) -> int:
 
 
 def rank_papers(papers: List[Dict]) -> List[Dict]:
-    """信頼度スコアの降順に並び替える。同点は出版日時が新しい順（PMID降順）。"""
     return sorted(
         papers,
         key=lambda p: (p.get("trust_score", 0), int(p.get("pmid", "0")) if p.get("pmid", "").isdigit() else 0),
