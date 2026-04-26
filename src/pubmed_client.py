@@ -5,7 +5,7 @@ from typing import Dict, List
 
 import requests
 
-from config import PUBMED_API_KEY, PUBMED_EMAIL
+from config import PUBMED_API_KEY, PUBMED_EMAIL, PUBMED_RELDATE_DAYS
 
 BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
@@ -41,7 +41,7 @@ PTYPE_SCORE = {
     "Observational Study": 15,
 }
 
-# 主要誌の加点（ISO略称で比較）
+# 主要誌の加点
 JOURNAL_BONUS = {
     "N Engl J Med": 30,
     "Lancet": 30,
@@ -68,13 +68,16 @@ def _common_params() -> Dict[str, str]:
 
 
 def search_pubmed(query: str, max_results: int = 50) -> List[str]:
-    """PubMed 検索で PMID リストを取得する。"""
+    """PubMed 検索で PMID リストを取得する（直近 PUBMED_RELDATE_DAYS 日以内）。"""
     params = {
         "db": "pubmed",
         "term": query,
         "retmax": str(max_results),
         "sort": "date",
         "retmode": "json",
+        # 期間フィルタ: 直近 N 日（publication date 基準）
+        "datetype": "pdat",
+        "reldate": str(PUBMED_RELDATE_DAYS),
         **_common_params(),
     }
     r = requests.get(f"{BASE_URL}/esearch.fcgi", params=params, timeout=30)
@@ -193,24 +196,19 @@ def _select_primary_ptype(ptypes: List[str]) -> str:
 
 
 def _calculate_trust_score(paper: Dict) -> int:
-    """論文の信頼度スコアを計算する。
-    Publication Type スコア + ジャーナル加点 + Abstract の充実度。
-    """
+    """論文の信頼度スコアを計算する。"""
     score = 0
 
-    # Publication Type による加点（複数あれば最大値）
     ptype_scores = [PTYPE_SCORE.get(pt, 0) for pt in paper.get("publication_types", [])]
     if ptype_scores:
         score += max(ptype_scores)
 
-    # ジャーナルによる加点
     journal_iso = paper.get("journal_iso", "")
     for key, bonus in JOURNAL_BONUS.items():
         if key.lower() == journal_iso.lower():
             score += bonus
             break
 
-    # Abstract の充実度（構造化 abstract は label 付きになる）
     abstract = paper.get("abstract", "")
     if len(abstract) > 1500:
         score += 5
